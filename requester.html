@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Requester</title>
+	<link rel="stylesheet" href="requester.css">
+</head>
+
+<body>
+	<header>
+		<h1>Requester</h1>
+	</header>
+
+	<div class="options">
+		<!-- <button id="generateToken">Generate token (TBI)</button> -->
+	</div>
+
+	<div class="container">
+		<div class="panel">
+			<div class="panel-header">
+				<h2>cURL Request</h2>
+				<button id="sendBtn">Send Request</button>
+			</div>
+
+			<textarea id="curlInput" placeholder="Paste your cURL command here..."></textarea>
+		</div>
+
+	<div class="panel">
+		<div class="panel-header">
+			<h2>Response</h2>
+			<button id="clearBtn">Clear</button>
+		</div>
+		<div class="search-container">
+			<input type="text" id="searchInput" placeholder="Search in response...">
+			<span class="search-info" id="searchInfo"></span>
+		</div>
+		<div class="output-container">
+			<div id="outputHighlight"></div>
+			<textarea id="output" class="output" readonly placeholder="Response will appear here..."></textarea>
+		</div>
+		<div class="status" id="status"></div>
+	</div>
+	</div>
+
+	<script>
+		const curlInput = document.getElementById('curlInput');
+		const output = document.getElementById('output');
+		const outputHighlight = document.getElementById('outputHighlight');
+		const sendBtn = document.getElementById('sendBtn');
+		const clearBtn = document.getElementById('clearBtn');
+		const status = document.getElementById('status');
+		const searchInput = document.getElementById('searchInput');
+		const searchInfo = document.getElementById('searchInfo');
+
+		let searchMatches = [];
+		let currentMatchIndex = -1;
+
+		// Sync textarea scroll with highlight overlay
+		output.addEventListener('scroll', () => {
+			outputHighlight.scrollTop = output.scrollTop;
+			outputHighlight.scrollLeft = output.scrollLeft;
+		});
+
+		function formatSize(bytes) {
+			if (bytes >= 1048576) return (bytes / 1048576).toFixed(2) + ' MB';
+			if (bytes >= 1024) return (bytes / 1024).toFixed(2) + ' kB';
+			return bytes + ' bytes';
+		}
+
+		function parseCurl(curlCommand) {
+			const request = {
+				method: 'GET',
+				headers: {},
+				body: null,
+				url: ''
+			};
+
+			// Normalize multi-line cURL: remove line continuation backslashes and normalize whitespace
+			let cmd = curlCommand
+				.replace(/\\\r?\n/g, ' ')  // Remove backslash line continuations
+				.replace(/\s+/g, ' ')       // Normalize whitespace
+				.trim()
+				.replace(/^curl\s+/i, '');  // Remove 'curl' from the beginning
+
+			// Extract URL (either quoted or unquoted)
+			const urlMatch = cmd.match(/(?:['"]([^'"]+)['"]|(\S+))/);
+			if (urlMatch) {
+				request.url = urlMatch[1] || urlMatch[2];
+				cmd = cmd.replace(urlMatch[0], '').trim();
+			}
+
+			// Extract method (-X or --request)
+			const methodMatch = cmd.match(/(?:-X|--request)\s+['"]?(\w+)['"]?/i);
+			if (methodMatch) {
+				request.method = methodMatch[1].toUpperCase();
+			}
+
+			// Extract headers (-H or --header)
+			const headerRegex = /(?:-H|--header)\s+['"]([^'"]+)['"]/gi;
+			let headerMatch;
+			while ((headerMatch = headerRegex.exec(cmd)) !== null) {
+				const [key, ...valueParts] = headerMatch[1].split(':');
+				request.headers[key.trim()] = valueParts.join(':').trim();
+			}
+
+			// Extract data (-d or --data)
+			const dataMatch = cmd.match(/(?:-d|--data|--data-raw)\s+['"](.+?)['"]/s);
+			if (dataMatch) {
+				request.body = dataMatch[1];
+			}
+
+			return request;
+		}
+
+		async function sendRequest() {
+			const curlCommand = curlInput.value.trim();
+
+			if (!curlCommand) {
+				output.value = 'Error: Please enter a cURL command';
+				updateHighlight();
+				status.textContent = '';
+				return;
+			}
+
+			try {
+				sendBtn.disabled = true;
+				output.value = 'Sending request...';
+				updateHighlight();
+				status.textContent = 'Status: Processing...';
+
+				const request = parseCurl(curlCommand);
+
+				if (!request.url) {
+					throw new Error('Could not parse URL from cURL command');
+				}
+
+				const startTime = Date.now();
+
+				const fetchOptions = {
+					method: request.method,
+					headers: request.headers
+				};
+
+				if (request.body && request.method !== 'GET' && request.method !== 'HEAD') {
+					fetchOptions.body = request.body;
+				}
+
+				const response = await fetch(request.url, fetchOptions);
+				const duration = Date.now() - startTime;
+
+				const contentType = response.headers.get('content-type');
+				let responseData;
+
+				if (contentType && contentType.includes('application/json')) {
+					responseData = await response.json();
+					output.value = JSON.stringify(responseData, null, 2);
+				} else {
+					responseData = await response.text();
+					output.value = responseData;
+				}
+
+				if (!response.ok) {
+					const hint = {
+						400: 'The request was malformed. Check your request body and parameters.',
+						401: 'Authentication is required. Check your API key or credentials.',
+						403: 'Access is forbidden. You may lack the required permissions.',
+						404: 'The requested resource was not found. Verify the URL.',
+						405: 'This HTTP method is not allowed for this endpoint.',
+						408: 'The request timed out. Try again later.',
+						429: 'Too many requests. You are being rate-limited. Wait and retry.',
+						500: 'The server encountered an internal error.',
+						502: 'Bad gateway. The upstream server returned an invalid response.',
+						503: 'The service is temporarily unavailable. Try again later.',
+						504: 'Gateway timeout. The upstream server did not respond in time.',
+					}[response.status] || '';
+					output.value = `⚠ HTTP ${response.status} — ${response.statusText}\n${hint ? hint + '\n' : ''}\n--- Server Response ---\n${output.value}`;
+				}
+
+				updateHighlight();
+
+				status.textContent = `Status: ${response.status} ${response.statusText} | Time: ${duration}ms | Size: ${formatSize(output.value.length)}`;
+
+			} catch (error) {
+				let hint = '';
+				if (error.message.includes('Failed to fetch')) {
+					hint = '\n\nPossible causes:\n• The server is unreachable or the URL is incorrect\n• Network connection issue\n• CORS policy blocking the request';
+				} else if (error.message.includes('NetworkError')) {
+					hint = '\n\nA network error occurred. Check your connection and the target URL.';
+				}
+				output.value = `❌ Request Failed\n\n${error.message}${hint}`;
+				updateHighlight();
+				status.textContent = 'Status: Failed';
+			} finally {
+				sendBtn.disabled = false;
+			}
+		}
+
+		function clearOutput() {
+			output.value = '';
+			outputHighlight.innerHTML = '';
+			status.textContent = '';
+			clearSearch();
+		}
+
+		function clearSearch() {
+			searchMatches = [];
+			currentMatchIndex = -1;
+			searchInfo.textContent = '';
+			searchInput.value = '';
+			updateHighlight();
+		}
+
+		function escapeHtml(text) {
+			return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+		}
+
+		function escapeRegExp(string) {
+			return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		}
+
+		function updateHighlight() {
+			const text = output.value;
+			const searchTerm = searchInput.value;
+
+			if (!searchTerm || !text) {
+				outputHighlight.innerHTML = escapeHtml(text);
+				return;
+			}
+
+			const escapedTerm = escapeRegExp(searchTerm);
+			const regex = new RegExp(escapedTerm, 'gi');
+			let matchIdx = 0;
+			const html = escapeHtml(text).replace(
+				new RegExp(escapeRegExp(escapeHtml(searchTerm)), 'gi'),
+				(match) => {
+					const cls = matchIdx === currentMatchIndex ? 'current' : '';
+					matchIdx++;
+					return `<mark class="${cls}">${match}</mark>`;
+				}
+			);
+			outputHighlight.innerHTML = html;
+		}
+
+		function searchInOutput() {
+			const searchTerm = searchInput.value;
+			const outputText = output.value;
+
+			if (!searchTerm || !outputText) {
+				searchMatches = [];
+				currentMatchIndex = -1;
+				searchInfo.textContent = '';
+				updateHighlight();
+				return;
+			}
+
+			// Create regex for case-insensitive contains search
+			const escapedTerm = escapeRegExp(searchTerm);
+			const regex = new RegExp(escapedTerm, 'gi');
+
+			searchMatches = [];
+			let match;
+
+			// Find all matches and their positions
+			while ((match = regex.exec(outputText)) !== null) {
+				searchMatches.push({
+					index: match.index,
+					length: match[0].length
+				});
+			}
+
+			if (searchMatches.length > 0) {
+				currentMatchIndex = 0;
+				updateHighlight();
+				scrollToCurrentMatch();
+				updateSearchInfo();
+			} else {
+				searchInfo.textContent = 'No matches';
+				currentMatchIndex = -1;
+				updateHighlight();
+			}
+		}
+
+		function scrollToCurrentMatch() {
+			const currentMark = outputHighlight.querySelector('mark.current');
+			if (currentMark) {
+				// Scroll the highlight div to the mark, then sync textarea
+				currentMark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+				// Wait for smooth scroll to settle, then sync
+				requestAnimationFrame(() => {
+					output.scrollTop = outputHighlight.scrollTop;
+				});
+			}
+		}
+
+		function updateSearchInfo() {
+			if (searchMatches.length > 0) {
+				searchInfo.textContent = `${currentMatchIndex + 1} of ${searchMatches.length}`;
+			} else {
+				searchInfo.textContent = '';
+			}
+		}
+
+		function nextMatch() {
+			if (searchMatches.length === 0) return;
+			currentMatchIndex = (currentMatchIndex + 1) % searchMatches.length;
+			updateHighlight();
+			scrollToCurrentMatch();
+			updateSearchInfo();
+		}
+
+		function previousMatch() {
+			if (searchMatches.length === 0) return;
+			currentMatchIndex = (currentMatchIndex - 1 + searchMatches.length) % searchMatches.length;
+			updateHighlight();
+			scrollToCurrentMatch();
+			updateSearchInfo();
+		}
+
+		sendBtn.addEventListener('click', sendRequest);
+		clearBtn.addEventListener('click', clearOutput);
+
+		// Search functionality
+		searchInput.addEventListener('input', searchInOutput);
+		searchInput.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') {
+				if (e.shiftKey) {
+					previousMatch();
+				} else {
+					nextMatch();
+				}
+			}
+		});
+
+		// Allow Ctrl/Cmd + Enter to send request
+		curlInput.addEventListener('keydown', (e) => {
+			if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+				sendRequest();
+			}
+		});
+	</script>
+</body>
+
+</html>
