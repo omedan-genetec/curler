@@ -51,17 +51,6 @@ h1 {
 	overflow: hidden;
 }
 
-.client-data {
-	padding: 0 1rem;
-	background: #34495e;
-	color: white;
-	display: flex;
-	flex-direction: row;
-	gap: 1rem;
-	justify-content: space-between;
-	align-items: center;
-}
-
 .request-container {
 	display: flex;
 	flex-direction: column;
