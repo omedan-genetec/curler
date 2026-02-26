@@ -78,9 +78,13 @@
 				url: ''
 			};
 
-			// Extract -Uri
-			const uriMatch = cmd.match(/-Uri\s+['"]?([^\s'"]+)['"]?/i);
-			if (uriMatch) request.url = uriMatch[1];
+			// Extract -Uri (handle quoted URLs that may contain special chars)
+			const uriMatch = cmd.match(/-Uri\s+["']([^"']+)["']/i) ||
+				cmd.match(/-Uri\s+([^\s]+)/i);
+			if (uriMatch) {
+				// Clean PowerShell backtick escapes from URL (e.g., `$ -> $)
+				request.url = uriMatch[1].replace(/`(.)/g, '$1');
+			}
 
 			// Extract -Method
 			const methodMatch = cmd.match(/-Method\s+['"]?(\w+)['"]?/i);
@@ -90,13 +94,19 @@
 			const ctMatch = cmd.match(/-ContentType\s+['"]([^'"]+)['"]/i);
 			if (ctMatch) request.headers['Content-Type'] = ctMatch[1];
 
-			// Extract -Headers @{ "Key" = "Value"; ... }
-			const headersMatch = cmd.match(/-Headers\s+@\{([^}]+)\}/i);
+			// Extract -Headers @{ ... } — supports both semicolon and newline separated pairs
+			const headersMatch = cmd.match(/-Headers\s+@\{([\s\S]*?)\}/i);
 			if (headersMatch) {
-				const pairs = headersMatch[1].split(';');
-				for (const pair of pairs) {
-					const kv = pair.match(/['"]?([^'"=]+)['"]?\s*=\s*['"]([^'"]*)['"]/);
-					if (kv) request.headers[kv[1].trim()] = kv[2].trim();
+				// Split on semicolons or newlines
+				const lines = headersMatch[1].split(/[;\r\n]+/);
+				for (const line of lines) {
+					const kv = line.match(/["']?([^"'=]+?)["']?\s*=\s*["'](.+?)["']\s*$/);
+					if (kv) {
+						const key = kv[1].trim();
+						// Clean PowerShell backtick escapes from values (e.g., `" -> ")
+						const value = kv[2].replace(/`(.)/g, '$1');
+						request.headers[key] = value;
+					}
 				}
 			}
 
@@ -116,18 +126,25 @@
 				url: ''
 			};
 
-			// Normalize multi-line: remove backslash, backtick (PowerShell), and caret (cmd) line continuations
-			let cmd = curlCommand
-				.replace(/`\r?\n/g, ' ')   // PowerShell backtick continuations
+			// Strip PowerShell variable assignments preceding the command (e.g., $session = New-Object ...)
+			let cmd = curlCommand.replace(/^\$\w+\s*=\s*[^\r\n]+[\r\n]+/gm, '').trim();
+
+			// Remove PowerShell backtick line continuations, but NOT backtick escapes inside strings
+			// Only strip a backtick immediately followed by a newline
+			cmd = cmd
+				.replace(/`\r?\n/g, ' ')   // PowerShell backtick line continuations
 				.replace(/\^\r?\n/g, ' ')  // cmd caret continuations
 				.replace(/\\\r?\n/g, ' ')  // Bash backslash continuations
-				.replace(/\s+/g, ' ')       // Normalize whitespace
 				.trim();
 
 			// Detect PowerShell native commands (Invoke-WebRequest, Invoke-RestMethod, iwr, irm)
-			if (/^(?:Invoke-(?:WebRequest|RestMethod)|iwr|irm)\s/i.test(cmd)) {
+			// They may appear after stripping variable lines, or with flags like -UseBasicParsing first
+			if (/(?:Invoke-(?:WebRequest|RestMethod)|iwr|irm)\s/i.test(cmd)) {
 				return parsePowerShellNative(cmd);
 			}
+
+			// Normalize whitespace for curl commands (safe after PS detection)
+			cmd = cmd.replace(/\s+/g, ' ').trim();
 
 			// Remove 'curl' or 'curl.exe' from the beginning
 			cmd = cmd.replace(/^curl(?:\.exe)?\s+/i, '');
