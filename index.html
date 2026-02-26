@@ -17,10 +17,15 @@
 		<div class="panel">
 			<div class="panel-header">
 				<h2>cURL Request</h2>
-				<button id="sendBtn">Send Request</button>
+				<div class="panel-header-actions">
+					<label class="cors-toggle" title="Route requests through a CORS proxy to avoid cross-origin errors">
+						<input type="checkbox" id="corsToggle"> CORS Proxy
+					</label>
+					<button id="sendBtn">Send Request</button>
+				</div>
 			</div>
 
-			<textarea id="curlInput" placeholder="Paste your cURL command here..."></textarea>
+			<textarea id="curlInput" placeholder="Paste your cURL command here (bash, PowerShell, or cmd)..."></textarea>
 		</div>
 
 	<div class="panel">
@@ -65,6 +70,44 @@
 			return bytes + ' bytes';
 		}
 
+		function parsePowerShellNative(cmd) {
+			const request = {
+				method: 'GET',
+				headers: {},
+				body: null,
+				url: ''
+			};
+
+			// Extract -Uri
+			const uriMatch = cmd.match(/-Uri\s+['"]?([^\s'"]+)['"]?/i);
+			if (uriMatch) request.url = uriMatch[1];
+
+			// Extract -Method
+			const methodMatch = cmd.match(/-Method\s+['"]?(\w+)['"]?/i);
+			if (methodMatch) request.method = methodMatch[1].toUpperCase();
+
+			// Extract -ContentType
+			const ctMatch = cmd.match(/-ContentType\s+['"]([^'"]+)['"]/i);
+			if (ctMatch) request.headers['Content-Type'] = ctMatch[1];
+
+			// Extract -Headers @{ "Key" = "Value"; ... }
+			const headersMatch = cmd.match(/-Headers\s+@\{([^}]+)\}/i);
+			if (headersMatch) {
+				const pairs = headersMatch[1].split(';');
+				for (const pair of pairs) {
+					const kv = pair.match(/['"]?([^'"=]+)['"]?\s*=\s*['"]([^'"]*)['"]/);
+					if (kv) request.headers[kv[1].trim()] = kv[2].trim();
+				}
+			}
+
+			// Extract -Body
+			const bodyMatch = cmd.match(/-Body\s+['"](.+?)['"]/s) ||
+				cmd.match(/-Body\s+@'[\r\n]+([\s\S]+?)[\r\n]+'@/);
+			if (bodyMatch) request.body = bodyMatch[1];
+
+			return request;
+		}
+
 		function parseCurl(curlCommand) {
 			const request = {
 				method: 'GET',
@@ -73,18 +116,46 @@
 				url: ''
 			};
 
-			// Normalize multi-line cURL: remove line continuation backslashes and normalize whitespace
+			// Normalize multi-line: remove backslash, backtick (PowerShell), and caret (cmd) line continuations
 			let cmd = curlCommand
-				.replace(/\\\r?\n/g, ' ')  // Remove backslash line continuations
+				.replace(/`\r?\n/g, ' ')   // PowerShell backtick continuations
+				.replace(/\^\r?\n/g, ' ')  // cmd caret continuations
+				.replace(/\\\r?\n/g, ' ')  // Bash backslash continuations
 				.replace(/\s+/g, ' ')       // Normalize whitespace
-				.trim()
-				.replace(/^curl\s+/i, '');  // Remove 'curl' from the beginning
+				.trim();
 
-			// Extract URL (either quoted or unquoted)
-			const urlMatch = cmd.match(/(?:['"]([^'"]+)['"]|(\S+))/);
-			if (urlMatch) {
-				request.url = urlMatch[1] || urlMatch[2];
-				cmd = cmd.replace(urlMatch[0], '').trim();
+			// Detect PowerShell native commands (Invoke-WebRequest, Invoke-RestMethod, iwr, irm)
+			if (/^(?:Invoke-(?:WebRequest|RestMethod)|iwr|irm)\s/i.test(cmd)) {
+				return parsePowerShellNative(cmd);
+			}
+
+			// Remove 'curl' or 'curl.exe' from the beginning
+			cmd = cmd.replace(/^curl(?:\.exe)?\s+/i, '');
+
+			// Extract URL: try explicit --url flag first, then find the first
+			// non-flag argument that looks like a URL (contains :// or starts with a known scheme)
+			const explicitUrl = cmd.match(/(?:--url)\s+['"]?([^\s'"]+)['"]?/i);
+			if (explicitUrl) {
+				request.url = explicitUrl[1];
+				cmd = cmd.replace(explicitUrl[0], '').trim();
+			} else {
+				// Tokenize and find the positional URL argument (skip flags and their values)
+				const flagsWithArgs = /^(?:-[XHdouAeTbcDKm]|--request|--header|--data|--data-raw|--data-binary|--data-urlencode|--output|--user-agent|--user|--cookie|--connect-timeout|--max-time|--retry|--upload-file|--form|--resolve|--proxy|--cacert|--cert|--key|--referer|--write-out)$/i;
+				const tokens = cmd.match(/(?:'[^']*'|"[^"]*"|\S+)/g) || [];
+				let urlIndex = -1;
+				for (let i = 0; i < tokens.length; i++) {
+					const t = tokens[i].replace(/^['"]|['"]$/g, '');
+					if (flagsWithArgs.test(t)) { i++; continue; } // skip flag + its value
+					if (/^-/.test(t)) continue; // skip boolean flags like -v, -k, --compressed
+					// This token is a positional argument — treat as URL
+					request.url = t;
+					urlIndex = i;
+					break;
+				}
+				if (urlIndex !== -1) {
+					tokens.splice(urlIndex, 1);
+					cmd = tokens.join(' ');
+				}
 			}
 
 			// Extract method (-X or --request)
@@ -101,8 +172,9 @@
 				request.headers[key.trim()] = valueParts.join(':').trim();
 			}
 
-			// Extract data (-d or --data)
-			const dataMatch = cmd.match(/(?:-d|--data|--data-raw)\s+['"](.+?)['"]/s);
+			// Extract data (-d or --data or --data-raw)
+			const dataMatch = cmd.match(/(?:-d|--data|--data-raw)\s+['"](.+?)['"]/s) ||
+				cmd.match(/(?:-d|--data|--data-raw)\s+\$'(.+?)'/s);
 			if (dataMatch) {
 				request.body = dataMatch[1];
 			}
@@ -143,7 +215,12 @@
 					fetchOptions.body = request.body;
 				}
 
-				const response = await fetch(request.url, fetchOptions);
+				const corsToggle = document.getElementById('corsToggle');
+				const targetUrl = corsToggle.checked
+					? 'https://corsproxy.io/?' + encodeURIComponent(request.url)
+					: request.url;
+
+				const response = await fetch(targetUrl, fetchOptions);
 				const duration = Date.now() - startTime;
 
 				const contentType = response.headers.get('content-type');
