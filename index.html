@@ -187,14 +187,27 @@
 			let headerMatch;
 			while ((headerMatch = headerRegex.exec(cmd)) !== null) {
 				const val = headerMatch[1].replace(/\\"/g, '"');
-				const [key, ...valueParts] = val.split(':');
-				request.headers[key.trim()] = valueParts.join(':').trim();
+				const colonIdx = val.indexOf(':');
+				if (colonIdx !== -1) {
+					const key = val.slice(0, colonIdx).trim();
+					if (key) request.headers[key] = val.slice(colonIdx + 1).trim();
+				} else if (val.endsWith(';')) {
+					const key = val.slice(0, -1).trim();
+					if (key) request.headers[key] = '';
+				}
 			}
 			// Also try single-quoted headers (bash style)
 			const headerRegexSingle = /(?:-H|--header)\s+'([^']*)'/gi;
 			while ((headerMatch = headerRegexSingle.exec(cmd)) !== null) {
-				const [key, ...valueParts] = headerMatch[1].split(':');
-				request.headers[key.trim()] = valueParts.join(':').trim();
+				const val = headerMatch[1];
+				const colonIdx = val.indexOf(':');
+				if (colonIdx !== -1) {
+					const key = val.slice(0, colonIdx).trim();
+					if (key) request.headers[key] = val.slice(colonIdx + 1).trim();
+				} else if (val.endsWith(';')) {
+					const key = val.slice(0, -1).trim();
+					if (key) request.headers[key] = '';
+				}
 			}
 
 			// Extract data (-d or --data or --data-raw)
