@@ -129,49 +129,50 @@
 			// Strip PowerShell variable assignments preceding the command (e.g., $session = New-Object ...)
 			let cmd = curlCommand.replace(/^\$\w+\s*=\s*[^\r\n]+[\r\n]+/gm, '').trim();
 
-			// Remove PowerShell backtick line continuations, but NOT backtick escapes inside strings
-			// Only strip a backtick immediately followed by a newline
+			// Remove line continuations
 			cmd = cmd
 				.replace(/`\r?\n/g, ' ')   // PowerShell backtick line continuations
-				.replace(/\^\r?\n/g, ' ')  // cmd caret continuations
+				.replace(/\^\s*\r?\n/g, ' ')  // cmd caret continuations
 				.replace(/\\\r?\n/g, ' ')  // Bash backslash continuations
 				.trim();
 
 			// Detect PowerShell native commands (Invoke-WebRequest, Invoke-RestMethod, iwr, irm)
-			// They may appear after stripping variable lines, or with flags like -UseBasicParsing first
 			if (/(?:Invoke-(?:WebRequest|RestMethod)|iwr|irm)\s/i.test(cmd)) {
 				return parsePowerShellNative(cmd);
 			}
 
-			// Normalize whitespace for curl commands (safe after PS detection)
+			// Detect cmd-style caret escaping (^" used as quote delimiter)
+			if (/\^"/.test(cmd)) {
+				// Normalize cmd ^ escaping: ^X -> X for any X
+				cmd = cmd.replace(/\^(.)/g, '$1');
+			}
+
+			// Normalize whitespace
 			cmd = cmd.replace(/\s+/g, ' ').trim();
 
 			// Remove 'curl' or 'curl.exe' from the beginning
 			cmd = cmd.replace(/^curl(?:\.exe)?\s+/i, '');
 
 			// Extract URL: try explicit --url flag first, then find the first
-			// non-flag argument that looks like a URL (contains :// or starts with a known scheme)
+			// non-flag argument that looks like a URL
 			const explicitUrl = cmd.match(/(?:--url)\s+['"]?([^\s'"]+)['"]?/i);
 			if (explicitUrl) {
 				request.url = explicitUrl[1];
-				cmd = cmd.replace(explicitUrl[0], '').trim();
 			} else {
-				// Tokenize and find the positional URL argument (skip flags and their values)
-				const flagsWithArgs = /^(?:-[XHdouAeTbcDKm]|--request|--header|--data|--data-raw|--data-binary|--data-urlencode|--output|--user-agent|--user|--cookie|--connect-timeout|--max-time|--retry|--upload-file|--form|--resolve|--proxy|--cacert|--cert|--key|--referer|--write-out)$/i;
-				const tokens = cmd.match(/(?:'[^']*'|"[^"]*"|\S+)/g) || [];
-				let urlIndex = -1;
-				for (let i = 0; i < tokens.length; i++) {
-					const t = tokens[i].replace(/^['"]|['"]$/g, '');
-					if (flagsWithArgs.test(t)) { i++; continue; } // skip flag + its value
-					if (/^-/.test(t)) continue; // skip boolean flags like -v, -k, --compressed
-					// This token is a positional argument — treat as URL
-					request.url = t;
-					urlIndex = i;
-					break;
-				}
-				if (urlIndex !== -1) {
-					tokens.splice(urlIndex, 1);
-					cmd = tokens.join(' ');
+				// Match first quoted or unquoted positional arg before any -flag
+				const urlFromQuoted = cmd.match(/^"((?:[^"\\]|\\.)*)"/);
+				if (urlFromQuoted) {
+					request.url = urlFromQuoted[1];
+				} else {
+					const flagsWithArgs = /^(?:-[XHdouAeTbcDKm]|--request|--header|--data|--data-raw|--data-binary|--data-urlencode|--output|--user-agent|--user|--cookie|--connect-timeout|--max-time|--retry|--upload-file|--form|--resolve|--proxy|--cacert|--cert|--key|--referer|--write-out)$/i;
+					const tokens = cmd.match(/(?:'[^']*'|"(?:[^"\\]|\\.)*"|\S+)/g) || [];
+					for (let i = 0; i < tokens.length; i++) {
+						const t = tokens[i].replace(/^['"]|['"]$/g, '');
+						if (flagsWithArgs.test(t)) { i++; continue; }
+						if (/^-/.test(t)) continue;
+						request.url = t;
+						break;
+					}
 				}
 			}
 
@@ -181,23 +182,32 @@
 				request.method = methodMatch[1].toUpperCase();
 			}
 
-			// Extract headers (-H or --header)
-			const headerRegex = /(?:-H|--header)\s+['"]([^'"]+)['"]/gi;
+			// Extract headers (-H or --header) - handles \" inside double-quoted values
+			const headerRegex = /(?:-H|--header)\s+"((?:[^"\\]|\\.)*)"/gi;
 			let headerMatch;
 			while ((headerMatch = headerRegex.exec(cmd)) !== null) {
+				const val = headerMatch[1].replace(/\\"/g, '"');
+				const [key, ...valueParts] = val.split(':');
+				request.headers[key.trim()] = valueParts.join(':').trim();
+			}
+			// Also try single-quoted headers (bash style)
+			const headerRegexSingle = /(?:-H|--header)\s+'([^']*)'/gi;
+			while ((headerMatch = headerRegexSingle.exec(cmd)) !== null) {
 				const [key, ...valueParts] = headerMatch[1].split(':');
 				request.headers[key.trim()] = valueParts.join(':').trim();
 			}
 
 			// Extract data (-d or --data or --data-raw)
-			const dataMatch = cmd.match(/(?:-d|--data|--data-raw)\s+['"](.+?)['"]/s) ||
-				cmd.match(/(?:-d|--data|--data-raw)\s+\$'(.+?)'/s);
+			const dataMatch = cmd.match(/(?:-d|--data|--data-raw)\s+"((?:[^"\\]|\\.)*)"/s) ||
+				cmd.match(/(?:-d|--data|--data-raw)\s+'([^']*)'/s) ||
+				cmd.match(/(?:-d|--data|--data-raw)\s+\$'((?:[^'\\]|\\.)*)'/s);
 			if (dataMatch) {
-				request.body = dataMatch[1];
+				request.body = dataMatch[1].replace(/\\"/g, '"');
 			}
 
 			return request;
 		}
+
 
 		async function sendRequest() {
 			const curlCommand = curlInput.value.trim();
